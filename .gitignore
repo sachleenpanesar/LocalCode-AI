@@ -1,8 +1,7 @@
-@'
+
 venv/
 __pycache__/
 *.pyc
 .env
 .streamlit/secrets.toml
 .DS_Store
-'@ | Set-Content -Encoding UTF8 .gitignore
