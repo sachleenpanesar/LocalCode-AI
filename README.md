@@ -1,4 +1,4 @@
-@'
+
 
 \[server]
 
@@ -13,6 +13,3 @@ maxUploadFileSize = 5
 base = "dark"
 
 primaryColor = "#22C55E"
-
-'@ | Set-Content -Encoding UTF8 .streamlit\\config.toml
-
