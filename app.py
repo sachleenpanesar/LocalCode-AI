@@ -14,7 +14,7 @@ from google.genai import types
 APP_NAME = "LocalCode AI"
 
 # Change these through Streamlit Secrets if needed.
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 OLLAMA_MODEL = "qwen3.5:4b"
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -505,7 +505,7 @@ if prompt:
                 f"AI request failed: {error}"
             )
 
-            if provider == "Gemini (Online)"):
+            if provider == "Gemini (Online)":
 
                 st.info(
                     "Check GEMINI_API_KEY, the Gemini model "
