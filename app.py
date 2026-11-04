@@ -1,5 +1,4 @@
 
-
 import os
 import streamlit as st
 import ollama
@@ -7,14 +6,21 @@ import ollama
 from google import genai
 from google.genai import types
 
-# ---------------- CONFIGURATION ----------------
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 APP_NAME = "LocalCode AI"
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+# Change these through Streamlit Secrets if needed.
+GEMINI_MODEL = "gemini-2.5-flash"
 OLLAMA_MODEL = "qwen3.5:4b"
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_TOTAL_TEXT = 200_000
+MAX_REQUESTS = 20
+MAX_HISTORY = 12
 
 SYSTEM_PROMPT = """
 You are LocalCode AI, an expert programming assistant.
@@ -37,18 +43,157 @@ Important rules:
 - Be clear when you are uncertain.
 """
 
+
+# ============================================================
+# STREAMLIT CONFIGURATION
+# ============================================================
+
 st.set_page_config(
     page_title=APP_NAME,
     page_icon="💻",
     layout="wide"
 )
 
-st.title("💻 LocalCode AI")
-st.caption(
-    "Your AI programming companion | Gemini + Ollama"
-)
 
-# ---------------- SESSION ----------------
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def get_setting(name, default=None):
+    """Read configuration from environment or Streamlit Secrets."""
+
+    value = os.getenv(name)
+
+    if value:
+        return value
+
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+
+def get_gemini_client():
+    """Initialize Gemini securely."""
+
+    api_key = get_setting("GEMINI_API_KEY")
+
+    if not api_key:
+        raise ValueError(
+            "Gemini API key is missing. "
+            "Add GEMINI_API_KEY to Streamlit Secrets."
+        )
+
+    return genai.Client(api_key=api_key)
+
+
+def build_conversation(messages):
+    """Build conversation history for Gemini."""
+
+    conversation = []
+
+    for message in messages[-MAX_HISTORY:]:
+        role = message["role"].upper()
+
+        conversation.append(
+            f"{role}:\n{message['content']}"
+        )
+
+    return "\n\n".join(conversation)
+
+
+def process_gemini(messages, images):
+    """Send conversation and screenshots to Gemini."""
+
+    client = get_gemini_client()
+
+    conversation = build_conversation(messages)
+
+    contents = [
+        "CONVERSATION HISTORY:\n\n" + conversation
+    ]
+
+    # Attach screenshots to the current request.
+    for name, data, mime_type in images:
+
+        contents.append(
+            types.Part.from_bytes(
+                data=data,
+                mime_type=mime_type
+            )
+        )
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.3
+        )
+    )
+
+    answer = response.text
+
+    if not answer:
+        raise RuntimeError(
+            "Gemini returned an empty response. "
+            "Try changing your prompt."
+        )
+
+    return answer
+
+
+def process_ollama(messages, images):
+    """Send conversation and screenshots to Ollama."""
+
+    ollama_host = get_setting(
+        "OLLAMA_HOST",
+        "http://127.0.0.1:11434"
+    )
+
+    client = ollama.Client(host=ollama_host)
+
+    chat_messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
+
+    chat_messages.extend(messages[-MAX_HISTORY:])
+
+    # Attach images to the latest user message.
+    if images:
+
+        for message in reversed(chat_messages):
+
+            if message["role"] == "user":
+
+                message["images"] = [
+                    data for name, data, mime in images
+                ]
+
+                break
+
+    response = client.chat(
+        model=OLLAMA_MODEL,
+        messages=chat_messages,
+        stream=False
+    )
+
+    answer = response.message.content
+
+    if not answer:
+        raise RuntimeError(
+            "Ollama returned an empty response."
+        )
+
+    return answer
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -56,9 +201,31 @@ if "messages" not in st.session_state:
 if "request_count" not in st.session_state:
     st.session_state.request_count = 0
 
-# ---------------- SIDEBAR ----------------
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.title("💻 LocalCode AI")
+
+st.caption(
+    "Your AI programming companion | Gemini + Ollama"
+)
+
+st.markdown(
+    """
+    Debug code, understand errors, analyze screenshots
+    and get help with your programming projects.
+    """
+)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 with st.sidebar:
+
     st.header("⚙️ Settings")
 
     provider = st.selectbox(
@@ -70,45 +237,92 @@ with st.sidebar:
     )
 
     if provider == "Gemini (Online)":
-        st.success("Gemini 3.5 Flash-Lite")
+
+        st.success("☁️ Gemini AI")
+
+        st.caption(
+            f"Model: {GEMINI_MODEL}"
+        )
+
     else:
-        st.info(f"Ollama: {OLLAMA_MODEL}")
+
+        st.info("🖥️ Ollama")
+
+        st.caption(
+            f"Model: {OLLAMA_MODEL}"
+        )
+
+        st.warning(
+            "Ollama must be accessible from the server "
+            "running this application. Your Windows "
+            "localhost is not accessible from Streamlit Cloud."
+        )
 
     st.divider()
 
-    st.write("📎 Supported attachments")
-    st.write("Screenshots, logs and source code")
+    st.subheader("📎 Attachments")
 
-    st.caption("Maximum file size: 5 MB")
+    st.write("Supported files:")
+    st.write(
+        "PNG, JPG, WEBP, TXT, LOG, PY, JS, "
+        "TS, JSON, HTML, CSS, SQL, JAVA, CPP"
+    )
 
-    if st.button("🗑️ Clear conversation"):
+    st.caption("Maximum file size: 5 MB per file")
+
+    st.divider()
+
+    if st.button(
+        "🗑️ Clear conversation",
+        use_container_width=True
+    ):
+
         st.session_state.messages = []
         st.rerun()
 
-    if st.button("🔄 Reset request counter"):
+    if st.button(
+        "🔄 Reset request counter",
+        use_container_width=True
+    ):
+
         st.session_state.request_count = 0
         st.rerun()
 
-    st.write(
-        f"Requests this session: "
-        f"{st.session_state.request_count}"
+    st.metric(
+        "Requests this session",
+        st.session_state.request_count
+    )
+
+    st.caption(
+        f"Session limit: {MAX_REQUESTS} requests"
     )
 
     st.divider()
-    st.caption("Built with Streamlit, Gemini and Ollama.")
 
-# ---------------- CHAT HISTORY ----------------
+    st.caption(
+        "Built with Streamlit, Gemini and Ollama."
+    )
+
+
+# ============================================================
+# CHAT HISTORY
+# ============================================================
 
 for message in st.session_state.messages:
+
     with st.chat_message(message["role"]):
+
         st.markdown(message["content"])
 
-# ---------------- FILE UPLOAD ----------------
+
+# ============================================================
+# FILE UPLOADER
+# ============================================================
 
 st.subheader("📎 Upload your coding problem")
 
 uploaded_files = st.file_uploader(
-    "Attach screenshots, error logs or code files",
+    "Attach screenshots, error logs or source code",
     type=[
         "png", "jpg", "jpeg", "webp",
         "txt", "log", "py", "ps1",
@@ -116,194 +330,202 @@ uploaded_files = st.file_uploader(
         "css", "sql", "java", "cpp",
         "cs", "xml", "yaml", "yml"
     ],
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    max_upload_size=5,
+    key="coding_file_uploader"
 )
+
+
+# ============================================================
+# PROCESS ATTACHMENTS
+# ============================================================
 
 images = []
 attachments = []
 total_text_size = 0
 
 if uploaded_files:
+
+    st.write("### Selected files")
+
     for file in uploaded_files:
+
         data = file.getvalue()
 
-        st.write(f"📄 {file.name} ({len(data):,} bytes)")
+        st.write(
+            f"📄 {file.name} ({len(data):,} bytes)"
+        )
 
         if len(data) > MAX_FILE_BYTES:
+
             st.warning(
-                f"{file.name} skipped: maximum size is 5 MB."
+                f"{file.name} skipped: file exceeds 5 MB."
             )
+
             continue
 
         if file.type.startswith("image/"):
-            images.append((file.name, data, file.type))
-            st.image(data, caption=file.name, width=300)
+
+            images.append(
+                (file.name, data, file.type)
+            )
+
+            st.image(
+                data,
+                caption=file.name,
+                width=300
+            )
 
         else:
-            if total_text_size + len(data) > MAX_TOTAL_TEXT:
+
+            if (
+                total_text_size + len(data)
+                > MAX_TOTAL_TEXT
+            ):
+
                 st.warning(
-                    f"{file.name} skipped: total text attachment "
-                    "limit is 200 KB."
+                    f"{file.name} skipped: total text "
+                    "attachment limit is 200 KB."
                 )
+
                 continue
 
-            text = data.decode("utf-8", errors="replace")
+            text = data.decode(
+                "utf-8",
+                errors="replace"
+            )
 
             attachments.append(
-                f"\n\n--- FILE: {file.name} ---\n{text}\n"
+                f"\n\n--- FILE: {file.name} ---\n"
+                f"{text}\n"
             )
 
             total_text_size += len(data)
 
-# ---------------- USER INPUT ----------------
+
+# ============================================================
+# USER INPUT
+# ============================================================
 
 prompt = st.chat_input(
     "Describe your programming problem..."
 )
 
+
+# ============================================================
+# PROCESS USER REQUEST
+# ============================================================
+
 if prompt:
 
-    if st.session_state.request_count >= 20:
+    if st.session_state.request_count >= MAX_REQUESTS:
+
         st.error(
             "Session request limit reached. "
-            "Please start a new session later."
+            "Please try again later."
         )
+
         st.stop()
 
+    # Construct user message.
     user_text = prompt
 
     if attachments:
-        user_text += "\n\nUPLOADED FILES:\n"
-        user_text += "".join(attachments)
 
-    if images:
         user_text += (
-            f"\n\nI have attached {len(images)} screenshots. "
-            "Please inspect their contents."
+            "\n\nUPLOADED FILES:\n"
+            + "".join(attachments)
         )
 
-    st.session_state.messages.append({
-        "role": "user",
-        "content": user_text
-    })
+    if images:
+
+        user_text += (
+            f"\n\nI have attached {len(images)} "
+            "screenshots. Please inspect them."
+        )
+
+    # Save user message.
+    st.session_state.messages.append(
+        {
+            "role": "user",
+            "content": user_text
+        }
+    )
 
     with st.chat_message("user"):
+
         st.markdown(prompt)
 
         if uploaded_files:
+
             st.caption(
-                "Attachments: " +
-                ", ".join(file.name for file in uploaded_files)
+                "Attachments: "
+                + ", ".join(
+                    file.name for file in uploaded_files
+                )
             )
 
+    # Generate AI response.
     with st.chat_message("assistant"):
 
         try:
-            with st.spinner("LocalCode AI is thinking..."):
+
+            with st.spinner(
+                "🤖 LocalCode AI is thinking..."
+            ):
 
                 if provider == "Gemini (Online)":
 
-                    api_key = os.getenv("GEMINI_API_KEY")
-
-                    try:
-                        api_key = (
-                            api_key or
-                            st.secrets.get("GEMINI_API_KEY")
-                        )
-                    except Exception:
-                        pass
-
-                    if not api_key:
-                        raise ValueError(
-                            "Gemini API key missing. "
-                            "Configure GEMINI_API_KEY."
-                        )
-
-                    client = genai.Client(api_key=api_key)
-
-                    history = st.session_state.messages[-12:]
-
-                    conversation = (
-                        SYSTEM_PROMPT +
-                        "\n\nCONVERSATION HISTORY:\n"
+                    answer = process_gemini(
+                        st.session_state.messages,
+                        images
                     )
-
-                    for item in history:
-                        role = item["role"].upper()
-                        conversation += (
-                            f"\n{role}:\n{item['content']}\n"
-                        )
-
-                    contents = [conversation]
-
-                    for name, data, mime_type in images:
-                        contents.append(
-                            types.Part.from_bytes(
-                                data=data,
-                                mime_type=mime_type
-                            )
-                        )
-
-                    response = client.models.generate_content(
-                        model=GEMINI_MODEL,
-                        contents=contents
-                    )
-
-                    answer = response.text
 
                 else:
 
-                    client = ollama.Client(
-                        host="http://127.0.0.1:11434"
+                    answer = process_ollama(
+                        st.session_state.messages,
+                        images
                     )
-
-                    messages = [
-                        {
-                            "role": "system",
-                            "content": SYSTEM_PROMPT
-                        }
-                    ]
-
-                    messages.extend(
-                        st.session_state.messages[-12:]
-                    )
-
-                    if images:
-                        messages[-1]["images"] = [
-                            data for name, data, mime in images
-                        ]
-
-                    response = client.chat(
-                        model=OLLAMA_MODEL,
-                        messages=messages,
-                        stream=False
-                    )
-
-                    answer = response.message.content
-
-                if not answer:
-                    answer = "The model returned an empty response."
 
                 st.markdown(answer)
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer
-                })
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": answer
+                    }
+                )
 
                 st.session_state.request_count += 1
 
         except Exception as error:
-            st.error(f"AI error: {error}")
 
-            st.info(
-                "Check your API key, model availability, "
-                "internet connection or Ollama server."
+            st.error(
+                f"AI request failed: {error}"
             )
+
+            if provider == "Gemini (Online)"):
+
+                st.info(
+                    "Check GEMINI_API_KEY, the Gemini model "
+                    "name, API access and internet connection."
+                )
+
+            else:
+
+                st.info(
+                    "Check OLLAMA_HOST, model availability "
+                    "and whether the Ollama server is running."
+                )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
 
 st.divider()
 
 st.caption(
     "LocalCode AI | AI-assisted programming and debugging"
 )
-
